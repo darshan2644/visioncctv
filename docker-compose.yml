@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  visioncctv:
+    build: .
+    container_name: visioncctv
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/storage:/app/backend/storage
+      - ./backend/ai_pipeline:/app/backend/ai_pipeline
+      - ./backend/routers:/app/backend/routers
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - PORT=8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - visioncctv-network
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: visioncctv-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - visioncctv
+    networks:
+      - visioncctv-network
+
+networks:
+  visioncctv-network:
+    driver: bridge
+
+volumes:
+  visioncctv-storage:

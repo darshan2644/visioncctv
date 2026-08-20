@@ -1,0 +1,41 @@
+# Docker ignore file for VisionCCTV
+
+# Ignore node_modules
+frontend/node_modules
+
+# Ignore Python cache and virtual environments
+backend/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+venv
+.venv
+
+# Ignore IDE files
+.vscode
+.idea
+*.swp
+*.swo
+
+# Ignore build artifacts
+frontend/.next
+frontend/out
+
+# Ignore storage (we'll use volumes)
+backend/storage
+
+# Ignore git files
+.git
+.gitignore
+
+# Ignore documentation
+*.md
+*.txt
+
+# Ignore logs
+*.log
+
+# Ignore DS_Store files
+.DS_Store

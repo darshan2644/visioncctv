@@ -1,0 +1,204 @@
+"""
+Export router — generate PDF reports and serve clip downloads.
+Phase 8: Forensic export capability.
+"""
+
+import json
+import time
+import uuid
+from io import BytesIO
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
+
+router = APIRouter()
+
+BASE_DIR = Path(__file__).parent.parent
+RESULTS_DIR = BASE_DIR / "storage" / "results"
+
+
+class ExportReportRequest(BaseModel):
+    job_id: str
+    title: str = "VisionCCTV Investigation Report"
+    investigator: str = "N/A"
+
+
+def _generate_pdf(matches: list[dict], title: str, investigator: str, job_id: str) -> bytes:
+    """Generate a forensic PDF report from match results."""
+    from reportlab.lib import colors  # noqa: PLC0415
+    from reportlab.lib.pagesizes import A4  # noqa: PLC0415
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle  # noqa: PLC0415
+    from reportlab.lib.units import cm  # noqa: PLC0415
+    from reportlab.platypus import (  # noqa: PLC0415
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, Image as RLImage
+    )
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        rightMargin=2 * cm,
+        leftMargin=2 * cm,
+        topMargin=2.5 * cm,
+        bottomMargin=2 * cm,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "title",
+        parent=styles["Title"],
+        fontSize=20,
+        spaceAfter=6,
+        textColor=colors.HexColor("#1a1a2e"),
+    )
+    heading_style = ParagraphStyle(
+        "heading",
+        parent=styles["Heading2"],
+        fontSize=12,
+        textColor=colors.HexColor("#16213e"),
+    )
+    normal_style = styles["Normal"]
+
+    story = []
+
+    # Header
+    story.append(Paragraph(title, title_style))
+    story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#e94560")))
+    story.append(Spacer(1, 0.3 * cm))
+
+    # Metadata table
+    meta_data = [
+        ["Report Generated", time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())],
+        ["Investigator", investigator],
+        ["Job ID", job_id],
+        ["Total Matches Found", str(len(matches))],
+    ]
+    meta_table = Table(meta_data, colWidths=[5 * cm, 12 * cm])
+    meta_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#16213e")),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ROWBACKGROUNDS", (1, 0), (1, -1), [colors.HexColor("#f8f9fa"), colors.white]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#dee2e6")),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 0.5 * cm))
+
+    # Matches
+    story.append(Paragraph(f"Evidence Frames ({len(matches)} matches)", heading_style))
+    story.append(Spacer(1, 0.2 * cm))
+
+    for i, match in enumerate(matches, 1):
+        story.append(Paragraph(f"Match #{i}", ParagraphStyle(
+            "match_title", parent=styles["Heading3"], textColor=colors.HexColor("#e94560"), fontSize=10
+        )))
+
+        match_data = [
+            ["Camera ID", match.get("camera_id", "N/A")],
+            ["Timestamp", match.get("timestamp_str", "N/A")],
+            ["Label / Query", match.get("label", "N/A")],
+            ["Confidence Score", f"{match.get('confidence', 0):.2%}"],
+            ["Search Type", match.get("search_type", "N/A")],
+        ]
+        t = Table(match_data, colWidths=[5 * cm, 12 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#0f3460")),
+            ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#dee2e6")),
+            ("PADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(t)
+
+        # Embed frame image if it exists
+        frame_url = match.get("frame_url", "")
+        if frame_url:
+            # Convert URL to local path: /storage/results/... → backend/storage/results/...
+            relative = frame_url.lstrip("/").replace("storage/", "")
+            frame_local = RESULTS_DIR / Path(frame_url.replace("/storage/results/", ""))
+            if frame_local.exists():
+                try:
+                    img = RLImage(str(frame_local), width=8 * cm, height=5 * cm, kind="proportional")
+                    story.append(Spacer(1, 0.2 * cm))
+                    story.append(img)
+                except Exception:
+                    pass
+
+        story.append(Spacer(1, 0.4 * cm))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#dee2e6")))
+        story.append(Spacer(1, 0.3 * cm))
+
+    # Footer note
+    story.append(Spacer(1, 1 * cm))
+    story.append(Paragraph(
+        "⚠ This report is generated by VisionCCTV AI Analysis Tool. "
+        "All evidence should be verified by a qualified forensic analyst before use in legal proceedings.",
+        ParagraphStyle("disclaimer", parent=normal_style, fontSize=7, textColor=colors.grey)
+    ))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.read()
+
+
+@router.post("/report")
+def export_report(request: ExportReportRequest):
+    """Generate and download a forensic PDF report for a completed search job."""
+    # Find manifest files for this job
+    all_matches = []
+
+    # Search across all sub-job dirs that start with job_id
+    for sub_dir in RESULTS_DIR.iterdir():
+        if not sub_dir.is_dir():
+            continue
+        if not sub_dir.name.startswith(request.job_id):
+            continue
+        manifest_file = sub_dir / "manifest.json"
+        if manifest_file.exists():
+            manifest = json.loads(manifest_file.read_text())
+            all_matches.extend(manifest.get("matches", []))
+
+    if not all_matches:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No results found for job '{request.job_id}'. Run a search first.",
+        )
+
+    pdf_bytes = _generate_pdf(all_matches, request.title, request.investigator, request.job_id)
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="visioncctv_report_{request.job_id}.pdf"'
+        },
+    )
+
+
+@router.get("/clip")
+def download_clip(clip_path: str):
+    """
+    Download a specific video clip.
+    clip_path should be the relative URL, e.g. /storage/results/jobid/clip_xxx.mp4
+    """
+    # Resolve to local file
+    relative = clip_path.replace("/storage/results/", "")
+    local_path = RESULTS_DIR / relative
+
+    if not local_path.exists():
+        raise HTTPException(status_code=404, detail="Clip file not found")
+
+    def iterfile():
+        with open(local_path, "rb") as f:
+            yield from f
+
+    filename = local_path.name
+    return StreamingResponse(
+        iterfile(),
+        media_type="video/mp4",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
